@@ -1,6 +1,6 @@
 # Simple Linux Container in Go
 
-A minimal container implementation demonstrating Linux namespaces, cgroups, and chroot.
+A minimal container implementation demonstrating Linux namespaces, cgroups, chroot, and **overlay filesystems** (like Docker).
 
 ## Requirements
 
@@ -111,11 +111,43 @@ Once inside, you'll notice:
 - Only container processes are visible (`ps aux`)
 - Filesystem is isolated to the rootfs
 - Limited to 100MB RAM, 50% CPU, 20 processes
+- **Changes are discarded on exit** (overlay filesystem)
 
 To exit the container shell:
 ```bash
 exit
 ```
+
+### Overlay Filesystem Behavior (Like Docker)
+
+The container uses an **overlay filesystem**:
+
+```
+┌─────────────────────────────────────────────┐
+│  What the container sees (merged view)      │
+├─────────────────────────────────────────────┤
+│  Upper Layer (writable)                     │  ← Your changes go here
+│  /root/container-overlay/upper/             │    (discarded on exit)
+├─────────────────────────────────────────────┤
+│  Lower Layer (read-only)                    │  ← Base Ubuntu system
+│  /root/rootfs/                              │    (never modified)
+└─────────────────────────────────────────────┘
+```
+
+**Example:**
+```bash
+# First run - create a file
+sudo ./container run /bin/bash
+root@container:/# echo "hello" > /myfile.txt
+root@container:/# exit
+
+# Second run - file is GONE (fresh start)
+sudo ./container run /bin/bash
+root@container:/# cat /myfile.txt
+cat: /myfile.txt: No such file or directory
+```
+
+This keeps your base rootfs clean and ensures every container run starts fresh.
 
 ---
 
@@ -162,6 +194,7 @@ This is expected! The `CLONE_NEWNET` flag creates an isolated network namespace 
 | Filesystem isolation | `CLONE_NEWNS` + `chroot` | Container sees only its rootfs |
 | Network isolation | `CLONE_NEWNET` | Container has separate network stack |
 | Resource limits | cgroups v2 | Limits CPU, memory, processes |
+| Copy-on-write | OverlayFS | Changes are discarded on exit (like Docker) |
 
 ---
 
@@ -173,12 +206,17 @@ This is expected! The `CLONE_NEWNET` flag creates an isolated network namespace 
 ├── container        # Compiled binary (after go build)
 └── README.md        # This file
 
-/root/rootfs/        # Container's root filesystem (created by debootstrap)
+/root/rootfs/        # Base filesystem - READ-ONLY (created by debootstrap)
 ├── bin/             # Basic commands (bash, ls, cat, etc.)
 ├── lib/             # Shared libraries
 ├── etc/             # Configuration files
 ├── proc/            # Process information (mounted at runtime)
 └── ...              # Other standard Linux directories
+
+/root/container-overlay/   # Overlay filesystem (created at runtime)
+├── upper/           # Writable layer - changes go here (cleaned each run)
+├── work/            # OverlayFS work directory (internal use)
+└── merged/          # Combined view (what container sees)
 ```
 
 ---
@@ -190,6 +228,9 @@ To remove everything:
 ```bash
 # Remove the rootfs (frees ~300MB)
 sudo rm -rf /root/rootfs
+
+# Remove the overlay directories
+sudo rm -rf /root/container-overlay
 
 # Remove the cgroup (created when container runs)
 sudo rmdir /sys/fs/cgroup/mycontainer

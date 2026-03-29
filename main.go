@@ -9,9 +9,17 @@ import (
 	"syscall"
 )
 
-// rootfs is the path to the container's root filesystem
+// rootfs is the path to the container's root filesystem (read-only base layer)
 // Create this with: debootstrap --variant=minbase jammy /root/rootfs
 const rootfs = "/root/rootfs"
+
+// Overlay filesystem directories
+const (
+	overlayBase   = "/root/container-overlay"
+	overlayUpper  = "/root/container-overlay/upper"  // Writable layer (changes go here)
+	overlayWork   = "/root/container-overlay/work"   // Required by overlayfs
+	overlayMerged = "/root/container-overlay/merged" // Combined view (what container sees)
+)
 
 func main() {
 	if len(os.Args) < 3 {
@@ -78,12 +86,37 @@ func setupFilesystem() {
 		return
 	}
 
-	// Change root to the new filesystem
-	must(syscall.Chroot(rootfs))
+	// Setup overlay filesystem for copy-on-write behavior (like Docker)
+	// This keeps the base rootfs clean - all changes go to the upper layer
+	setupOverlayFS()
+
+	// Change root to the merged overlay filesystem
+	must(syscall.Chroot(overlayMerged))
 	must(os.Chdir("/"))
 
 	// Mount /proc inside the container (required for ps, top, etc.)
 	must(syscall.Mount("proc", "/proc", "proc", 0, ""))
+}
+
+// setupOverlayFS creates an overlay filesystem with:
+// - Lower layer: the base rootfs (read-only)
+// - Upper layer: writable layer for changes (discarded on exit)
+// - Merged: combined view that the container sees
+func setupOverlayFS() {
+	// Clean up any previous overlay directories
+	os.RemoveAll(overlayBase)
+
+	// Create overlay directories
+	must(os.MkdirAll(overlayUpper, 0755))
+	must(os.MkdirAll(overlayWork, 0755))
+	must(os.MkdirAll(overlayMerged, 0755))
+
+	// Mount the overlay filesystem
+	// Format: "lowerdir=<ro-base>,upperdir=<rw-layer>,workdir=<work>"
+	overlayOpts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", rootfs, overlayUpper, overlayWork)
+	must(syscall.Mount("overlay", overlayMerged, "overlay", 0, overlayOpts))
+
+	fmt.Println("Overlay filesystem mounted (changes will be discarded on exit)")
 }
 
 func setupCgroups() {
