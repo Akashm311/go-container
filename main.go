@@ -21,6 +21,9 @@ const (
 	overlayMerged = "/root/container-overlay/merged" // Combined view (what container sees)
 )
 
+// cgroup path for resource limits
+const cgroupPath = "/sys/fs/cgroup/mycontainer"
+
 func main() {
 	if len(os.Args) < 3 {
 		fmt.Println("Usage: main run <command> [args...]")
@@ -50,6 +53,9 @@ func parent() {
 		fmt.Println("ERROR", err)
 		os.Exit(1)
 	}
+
+	// Cleanup: remove cgroup after container exits
+	cleanupCgroup()
 }
 
 func child() {
@@ -120,9 +126,6 @@ func setupOverlayFS() {
 }
 
 func setupCgroups() {
-	// Create a cgroup for this container
-	cgroupPath := "/sys/fs/cgroup/mycontainer"
-	
 	// Create cgroup directory (cgroup v2)
 	os.MkdirAll(cgroupPath, 0755)
 
@@ -138,6 +141,15 @@ func setupCgroups() {
 	// Add this process to the cgroup
 	pid := os.Getpid()
 	os.WriteFile(filepath.Join(cgroupPath, "cgroup.procs"), []byte(strconv.Itoa(pid)), 0644)
+}
+
+func cleanupCgroup() {
+	// Remove the cgroup directory
+	// Note: cgroup must be empty (no processes) before removal
+	if err := os.Remove(cgroupPath); err != nil {
+		// Non-fatal: cgroup cleanup failure shouldn't crash
+		fmt.Printf("Warning: could not remove cgroup: %v\n", err)
+	}
 }
 
 func must(err error) {
