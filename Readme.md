@@ -202,21 +202,21 @@ This is expected! The `CLONE_NEWNET` flag creates an isolated network namespace 
 
 ```
 /home/contianer/
-├── main.go          # Container implementation
-├── container        # Compiled binary (after go build)
-└── README.md        # This file
+├── main.go              # Container implementation (requires root)
+├── main_rootless.go     # Rootless container (no sudo needed)
+├── container            # Compiled binary (after go build)
+├── container-rootless   # Rootless binary (after go build)
+└── README.md            # This file
 
-/root/rootfs/        # Base filesystem - READ-ONLY (created by debootstrap)
-├── bin/             # Basic commands (bash, ls, cat, etc.)
-├── lib/             # Shared libraries
-├── etc/             # Configuration files
-├── proc/            # Process information (mounted at runtime)
-└── ...              # Other standard Linux directories
+/root/rootfs/            # Base filesystem for ROOT container
+├── bin/
+├── lib/
+└── ...
 
-/root/container-overlay/   # Overlay filesystem (created at runtime)
-├── upper/           # Writable layer - changes go here (cleaned each run)
-├── work/            # OverlayFS work directory (internal use)
-└── merged/          # Combined view (what container sees)
+~/container-rootfs/      # Base filesystem for ROOTLESS container
+├── bin/
+├── lib/
+└── ...
 ```
 
 ---
@@ -256,6 +256,118 @@ go build -o container main.go
 
 # 4. Run it!
 sudo ./container run /bin/bash
+```
+
+---
+
+## Rootless Container (No sudo required!)
+
+There's also a **rootless version** that runs without root privileges using user namespaces.
+
+### How UID Mapping Works
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  HOST                           CONTAINER                   │
+│  ┌─────────────────┐           ┌─────────────────┐          │
+│  │ UID 1000 (you)  │  ──────►  │ UID 0 (root)    │          │
+│  │ GID 1000        │  mapping  │ GID 0 (root)    │          │
+│  └─────────────────┘           └─────────────────┘          │
+│                                                             │
+│  You APPEAR to be root inside, but on the host you're      │
+│  still your unprivileged user. Safe!                        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Build Rootless Version
+
+```bash
+go build -o container-rootless main_rootless.go
+```
+
+### Setup Rootfs for Rootless (Choose One Method)
+
+**Option 1: Extract from Docker (Recommended)**
+```bash
+# Create rootfs directory
+mkdir -p ~/container-rootfs
+
+# Export an Alpine Linux image
+docker export $(docker create alpine) | tar -C ~/container-rootfs -xf -
+```
+
+**Option 2: Extract from Docker (Ubuntu)**
+```bash
+mkdir -p ~/container-rootfs
+docker export $(docker create ubuntu:22.04) | tar -C ~/container-rootfs -xf -
+```
+
+**Option 3: Download Alpine Mini Root FS**
+```bash
+mkdir -p ~/container-rootfs
+cd ~/container-rootfs
+wget https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-minirootfs-3.19.1-x86_64.tar.gz
+tar -xzf alpine-minirootfs-3.19.1-x86_64.tar.gz
+rm alpine-minirootfs-3.19.1-x86_64.tar.gz
+```
+
+### Run Rootless Container
+
+```bash
+# No sudo needed!
+./container-rootless run /bin/sh
+
+# Check you're "root" inside
+id
+# Output: uid=0(root) gid=0(root)
+
+# But you can only access files your real user owns
+```
+
+### Rootless Limitations
+
+| Feature | Root Container | Rootless Container |
+|---------|---------------|-------------------|
+| Network namespace | Full (can create interfaces) | Limited (no new interfaces) |
+| OverlayFS | Works | Requires fuse-overlayfs |
+| Cgroups | Full control | Limited (cgroupv2 + delegation) |
+| Bind to ports < 1024 | Yes | No |
+| Access all files | Yes | Only files you own |
+
+### Enable User Namespaces (if needed)
+
+Some systems disable unprivileged user namespaces. Enable with:
+
+```bash
+# Check if enabled
+cat /proc/sys/kernel/unprivileged_userns_clone
+# 1 = enabled, 0 = disabled
+
+# Enable temporarily
+sudo sysctl kernel.unprivileged_userns_clone=1
+
+# Enable permanently
+echo 'kernel.unprivileged_userns_clone=1' | sudo tee /etc/sysctl.d/userns.conf
+sudo sysctl --system
+```
+
+### The Key Code Change
+
+```go
+cmd.SysProcAttr = &syscall.SysProcAttr{
+    Cloneflags: syscall.CLONE_NEWUSER | // ← This enables rootless!
+                syscall.CLONE_NEWUTS |
+                syscall.CLONE_NEWPID |
+                syscall.CLONE_NEWNS,
+    
+    // Map your UID (e.g., 1000) to root (0) inside container
+    UidMappings: []syscall.SysProcIDMap{
+        {ContainerID: 0, HostID: os.Getuid(), Size: 1},
+    },
+    GidMappings: []syscall.SysProcIDMap{
+        {ContainerID: 0, HostID: os.Getgid(), Size: 1},
+    },
+}
 ```
 
 ---
